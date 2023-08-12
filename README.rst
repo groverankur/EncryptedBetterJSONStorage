@@ -26,11 +26,11 @@ Anything else can be found in the `TinyDB docs <https://tinydb.readthedocs.io/>`
 Installing EncryptedBetterJSONStorage
 ****************************
 
-Install EncryptedBetterJSONStorage from `PyPi <https://pypi.org/project/EncryptedBetterJSONStorage/>`_.
+Install EncryptedBetterJSONStorage as follows
 
 .. code-block:: PowerShell
 
-    pip install EncryptedBetterJSONStorage
+    python setup.py install
 
 Usage
 ************
