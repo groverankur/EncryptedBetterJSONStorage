@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "EncryptedBetterJSONStorage"
+dynamic = ["version"]
+description = "An optimized tinyDB storage extension with encryption and compression"
+readme = "README.rst"
+license = ""
+requires-python = ">=3.8"
+authors = [
+    { name = "Ankur Grover", email = "Ankur Grover" },
+]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+dependencies = [
+    "blosc2",
+    "mypy",
+    "orjson",
+    "tinydb",
+    "cryptography",
+]
+
+[project.urls]
+Homepage = "https://github.com/groverankur/EncryptedBetterJSONStorage"
+
+[tool.hatch.version]
+path = "src/EncryptedBetterJSONStorage/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/EncryptedBetterJSONStorage",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+]
