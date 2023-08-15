@@ -9,7 +9,7 @@ Introduction
     :target: https://github.com/psf/black
 
 
-EncryptedBetterJSONStorage is a faster 'Storage Type' for TinyDB_  by Adding encryption to BetterJSONStorage_
+EncryptedBetterJSONStorage is a faster 'Storage Type' for TinyDB_  by taking BetterJSONStorage_ & TinyDB_ JSONStorage as base.
 It uses the faster Orjson_ library for parsing the JSON , BLOSC2_ for compression and cryptography_ for encryption.
 
 Parsing, compressing, and writing to the file is done by a seperate thread so reads don't get blocked by slow fileIO.
@@ -58,7 +58,7 @@ context Manager
 extra
 =====
 one difference from TinyDB default JSONStorage is that BetterJSONStorage is ReadOnly by default.
-use access_mode='r+' if you want to write as well.
+use access_mode='r+' or 'rb+' if you want to write as well.
 
 All arguments except for the storage and access_mode argument are forwarded to the underlying storage.
 You can use this to pass additional keyword arguments to orjson.dumps(…) method.
@@ -67,4 +67,13 @@ For all options see the `orjson documentation <https://github.com/ijl/orjson#opt
 
 .. code-block:: python
 
-    with TinyDB('file.db',encryption_key=b"KeY", encryption=True ,compression=True, option=orjson.OPT_NAIVE_UTC, storage=EncryptedBetterJSONStorage) as db:
+    with TinyDB('file.db',encryption_key=b"KeY", encryption=True ,compression=True, option=orjson.OPT_NAIVE_UTC, storage=BetterEncryptedJSONStorage) as db:
+
+Change encryption key
+=====================
+
+You can change the encryption key of the storage by accessing the storage property of your `TinyDB docs <https://tinydb.readthedocs.io/>`_ database.
+
+.. code-block:: python
+    db = ...
+    db.storage.change_encryption_key("NEW_KEY")

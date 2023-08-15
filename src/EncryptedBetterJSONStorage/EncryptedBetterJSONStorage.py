@@ -21,9 +21,12 @@
 # SOFTWARE.
 
 import _thread as Thread
-from io import BufferedRandom, BufferedWriter
-from pathlib import Path
-from typing import Literal, Mapping, Optional, Set, Union
+import warnings
+from io import BufferedRandom, BufferedWriter, UnsupportedOperation
+from os import SEEK_END, fsync, remove
+from typing import Literal, Mapping, Optional, Union
+
+from tinydb.storages import Storage, touch
 
 try:
     from blosc2 import compress, decompress
@@ -36,33 +39,39 @@ except ImportError as e:
     raise ImportError("Dependencies not satisfied: pip install orjson") from e
 
 try:
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives.hashes import SHA256,Hash
     from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.hashes import SHA256, Hash
 except ImportError as e:
     raise ImportError("Dependencies not satisfied: pip install cryptography") from e
 
-class EncryptedBetterJSONStorage:
-    """
-    A class that represents a storage interface for reading and writing to a file with encryption and compression.
 
+class BetterEncryptedJSONStorage(Storage):
+    """
+    A class that represents a storage interface for reading and writing to a file with encryption and compression
 
     Attributes
     ----------
-    `dbpath: str`
-        Path to file, if it does not exist it will be created only if the the 'r+' access mode is set.
+    `path: str`
+        Path to file, if it does not exist it will be created only if the the 'r+'/'rb+' access mode is set.
+
+    `create_dirs: bool`
+        Whether to create all missing parent directories.
+
+    `encoding: str`
+        Encoding of the encrypted file
+
+    `access_mode: str, optional`
+        Options are `'r' or 'rb'` for readonly (default), or `'r' or 'rb+'` for writing and reading.if encryption is set, access mode need to either `rb or rb+`
 
     `encryption_key: bytes, Optional`
         These attributes will be passed encryption key to `cryptography.algorithms.AES` if encryption is set to True
 
     `encryption: bool`
         Set to True if encryption is required
-    
+
     `compression: bool`
         Set to True if compression is required
-
-    `access_mode: str, optional`
-        Options are `'r'` for readonly (default), or `'r+'` for writing and reading.
 
     `kwargs:`
         These attributes will be passed on to `orjson.dumps`
@@ -73,7 +82,7 @@ class EncryptedBetterJSONStorage:
         Returns the data from memory.
 
     `write(data: Mapping) -> None:`
-        Writes data to file if acces mode is set to `r+`.
+        Writes data to file if acces mode is set either  to `r+` or `rb+`.
 
     `load() -> None:`
         loads the data from disk. This happens on object creation.
@@ -85,152 +94,233 @@ class EncryptedBetterJSONStorage:
 
     Notes
     ----
-    If the directory specified in `dbpath` does not exist it will only be created if access_mode is set to `'r+'`.
+    If the directory specified in `path` does not exist it will only be created if access_mode is set either to `rb or rb+`.
     """
 
-    __slots__ = (
-        "_hash",
-        "_access_mode",
-        "_dbpath",
-        "_data",
-        "_kwargs",
-        "_changed",
-        "_running",
-        "_shutdown_lock",
-        "_handle",
-        "encryption_key",
-        "encryption",
-        "compression",
-    )
-
-    _dbpaths: Set[int] = set()
-
     def __init__(
-        self, dbpath: Path = Path(),encryption_key:Optional[bytes] = None, encryption:bool = False ,compression:bool = False, access_mode: Literal["r", "r+"] = "r", **kwargs
+        self,
+        path: str,
+        create_dirs=False,
+        encoding=None,
+        encryption_key: Optional[bytes] = None,
+        encryption: bool = False,
+        compression: bool = False,
+        access_mode: Literal["r", "rb", "r+", "rb+"] = "r",
+        **kwargs,
     ):
+        """
+        Create a new instance.
+
+        Also creates the storage file, if it doesn't exist and the access mode
+        is appropriate for writing.
+        Parsing, compressing,encryption and writing to the file is done by a seperate thread so reads don't get blocked by slow fileIO.
+
+        Note: Using an access mode other than `r` or `r+` or `rb` or `rb+` will probably lead to data loss or data corruption!
+
+        :param path: Where to store the JSON data.
+        :param create_dirs: Whether to create all missing parent directories.
+        :param encoding: encoding of the encrypted file.
+        :param encryption_key: The encryption / decryption key
+        :param encryption: Whether encryption is required
+        :param compression: Whether compression is required
+        :param access_mode: mode in which the file is opened (r, r+, rb, rb+)
+        :type access_mode: str
+        """
+
+        super().__init__()
+
         # flags
         self._shutdown_lock = Thread.allocate_lock()
         self._running = True
         self._changed = False
 
-        # checks
-        self._hash = hash(dbpath)
-
         # encryption and compression
         if encryption and encryption_key == None:
-            raise AttributeError(f'Please provide encryption_key if encryption is set to True')
+            raise AttributeError(
+                "Please provide encryption_key if encryption is set to True"
+            )
 
         self.encryption = encryption
         self.compression = compression
         if self.encryption:
-            self.raw_encryption_key = encryption_key
+            self.raw_encryption_key = self.__reset_hash(encryption_key)
             self._nonce = b"authenticated but unencrypted data"
-            self._cipher = Cipher(algorithms.AES(self.raw_encryption_key),modes.GCM(self._nonce),backend=default_backend())
+            self._cipher = Cipher(
+                algorithms.AES(self.raw_encryption_key),
+                modes.GCM(self._nonce),
+                backend=default_backend(),
+            )
             self.encryptor = self._cipher.encryptor()
             self.decryptor = self._cipher.decryptor()
 
+        self._mode = access_mode
+        self.kwargs = kwargs
+        self._data: Optional[Mapping] = None
         self._handle: Optional[Union[BufferedWriter, BufferedRandom]] = None
-        if access_mode not in {"r", "r+"}:
+        self._path = path
+        self.encoding = encoding
+        self._create_dirs = create_dirs
+
+        if self._mode not in ("r", "rb", "r+", "rb+"):
             self.close()
-            raise AttributeError(
-                f'access_mode is not one of ("r", "r+"), :{access_mode}'
+            warnings.warn(
+                "Using an `access_mode` other than 'r', 'rb', 'r+' or 'rb+' can cause data loss or corruption"
             )
 
-        if not isinstance(dbpath, Path):
-            self.close()
-            raise TypeError("path is not an instance of pathlib.Path")
+        # Create the file if it doesn't exist and creating is allowed by the access mode
+        if any(
+            [character in self._mode for character in ("+", "w", "a")]
+        ):  # any of the writing modes
+            touch(self._path, create_dirs=self._create_dirs)
 
-        if not dbpath.exists():
-            if access_mode == "r":
-                self.close()
-                raise FileNotFoundError(
-                    f"""File can't be found, use access_mode='r+' if you wan to create it.
-                        dbpath: <{dbpath.absolute()}>,
-                        """
-                )
-            dbpath.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = dbpath.open("wb+")
-        if not dbpath.is_file():
-            self.close()
-            raise FileNotFoundError(
-                f"""path does not lead to a file: <{dbpath.absolute()}>."""
-            )
-        else:
-            self._handle = dbpath.open("rb+")
-
-        self._access_mode = access_mode
-        self._dbpath = dbpath
-
-        # rest
-        self._kwargs = kwargs
-        self._data: Optional[Mapping]
+        # Open the file for reading/writing
+        self.__reset_handle()
 
         # finishing init
         self.load()
         # only start the file write at all if the access mode is not read only
-        if access_mode == "r+":
+        if self._mode in ["r+", "rb+"]:
             Thread.start_new_thread(self.__file_writer, ())
 
-    def __new__(cls, dbpath, *args, **kwargs):
-        h = hash(dbpath)
-        if h in cls._dbpaths:
-            raise AttributeError(
-                f'A EncryptedBetterJSONStorage object already exists with path < "{dbpath}" >'
-            )
-        cls._dbpaths.add(h)
-        return object.__new__(cls)
-
     def __repr__(self):
-        return (
-            f"""BetterEncryptedJSONStorage(encryption_key={self.raw_encryption_key}, encryption={self.encryption},compression={self.compression},path={self._path}, Paths={self.__class__._paths})"""
-        )
+        return f"""BetterEncryptedJSONStorage(path={self._path},create_dirs={self._create_dirs},encoding={self.encoding},encryption_key={self.raw_encryption_key}, encryption={self.encryption},compression={self.compression},access_mode={self._mode})"""
 
-    def read(self):
-        return self._data
-
-    def __file_writer(self):
-        self._shutdown_lock.acquire()
-        while self._running:
-
-            if self._changed:
-                self._changed = False
-                self._handle.seek(0)
-                if self.compression and self.encryption:
-                    self._handle.write(self.encryptor.update(compress(dumps(self._data))))
-                elif self.encryption:
-                    self._handle.write(self.encryptor.update(dumps(self._data)))
-                elif self.compression:
-                    self._handle.write(compress(dumps(self._data)))
-                else :
-                    self._handle.write(dumps(self._data))
-
-        self._shutdown_lock.release()
-
-    def write(self, data: Mapping):
-        if self._access_mode != "r+":
-            raise PermissionError("Storage is openend as read only")
-        self._data = data
-        self._changed = True
-
-    def load(self) -> None:
-        if len(db_bytes := self._dbpath.read_bytes()):
-            if self.compression and self.encryption:
-                self._data = loads(decompress(self.decryptor.update(db_bytes)))
-            elif self.encryption:
-                self._data = loads(self.decryptor.update(db_bytes))
-            elif self.compression:
-                self._data = loads(decompress(db_bytes))
-            else :
-                self._data = loads(db_bytes)
-        else:
-            self._data = None
-
-    def close(self):
+    def close(self) -> None:
         while self._changed:
             ...
         self._running = False
         self._shutdown_lock.acquire()
-        if self._handle != None:
+        if self._handle is not None:
             self._handle.flush()
             self._handle.close()
-        self.__class__._dbpaths.discard(self._hash)
+
+    def read(self) -> Optional[Mapping]:
+        return self._data
+
+    def load(self) -> None:
+        # Get the file size by moving the cursor to the file end and reading
+        # its location
+        self._handle.seek(0, SEEK_END)
+        size = self._handle.tell()
+
+        if not size:
+            # File is empty, so we return ``None`` so TinyDB can properly
+            # initialize the database
+            return None
+        else:
+            # Return the cursor to the beginning of the file
+            self._handle.seek(0)
+
+            # Load the JSON contents of the file
+            if len(db_bytes := self._handle.read()):
+                self._data = loads(
+                    decompress(self.decryptor.update(db_bytes))
+                    if self.compression and self.encryption
+                    else self.decryptor.update(db_bytes)
+                    if self.encryption
+                    else decompress(db_bytes)
+                    if self.compression
+                    else db_bytes,
+                    **self.kwargs,
+                )
+            else:
+                self._data = None
+
+    def __file_writer(self):
+        self._shutdown_lock.acquire()
+        while self._running:
+            if self._changed:
+                self._changed = False
+                # Move the cursor to the beginning of the file just in case
+                self._handle.seek(0)
+                # Serialize the database state using the user-provided arguments
+                serialized = (
+                    self.encryptor.update(compress(dumps(self._data, **self.kwargs)))
+                    if self.compression and self.encryption
+                    else self.encryptor.update(dumps(self._data, **self.kwargs))
+                    if self.encryption
+                    else compress(dumps(self._data, **self.kwargs))
+                    if self.compression
+                    else dumps(self._data, **self.kwargs)
+                )
+                # Write the serialized data to the file
+                try:
+                    self._handle.write(serialized)
+                except UnsupportedOperation as exc:
+                    raise IOError(
+                        f'Cannot write to the database. Access mode is "{0}"'.format(
+                            self._mode
+                        )
+                    ) from exc
+
+                # Ensure the file has been written
+                self._handle.flush()
+                fsync(self._handle.fileno())
+                # Remove data that is behind the new cursor in case the file has gotten shorter
+                self._handle.truncate()
+
+        self._shutdown_lock.release()
+
+    def write(self, data: Mapping):
+        if self._mode not in ["r+", "rb+"]:
+            raise PermissionError("Storage is openend as read only")
+        self._data = data
+        self._changed = True
+
+    def __reset_handle(self):
+        """
+        Open/Reopens the file handle with (potentially a new key)
+        """
+        self._handle = open(self._path, mode=self._mode, encoding=self.encoding)
+
+    def __reset_hash(self, key):
+        h = Hash(SHA256, default_backend)
+        h.update(key)
+        return h.finalize()
+
+    def change_encryption_key(self, new_encryption_key):
+        """
+        Changes the encryption key of the storage to the new encryption key. Can be called via db.storage.change_encryption_key(...).
+        :param new_encryption_key: A string that contains the new encryption key.
+        """
+        from shutil import copyfile
+        from sys import exc_info
+
+        from tinydb import TinyDB
+
+        new_db_path = self._path + "_clone"
+        new_encryption_key = self.__reset_hash(new_encryption_key)
+
+        try:
+            db_new_pw = TinyDB(
+                encryption_key=new_encryption_key,
+                path=new_db_path,
+                storage=BetterEncryptedJSONStorage,
+            )
+        except:
+            print("Failed opening database with new password, aborting.", exc_info()[0])
+            print("Error: ", exc_info()[1])
+            return False
+
+        try:
+            # copy from old to new
+            self._handle.flush()
+            db_new_pw.storage.write(self.read())
+            self.close()
+            db_new_pw.close()
+
+            # copy new over old
+            copyfile(new_db_path, self.path)
+
+            # reset encryption handle
+            self.raw_encryption_key = new_encryption_key
+            self.__reset_handle()
+
+            success = True
+        except:
+            print("could not write database: ", exc_info()[0])
+            print("Error: ", exc_info()[1])
+            success = False
+        finally:
+            remove(new_db_path)
+        return success
