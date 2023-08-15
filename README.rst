@@ -1,4 +1,4 @@
-.. image:: https://raw.githubusercontent.com/groverankur/EncryptedBetterJSONStorage/master/img/logo.png
+.. image:: https://github.com/groverankur/EncryptedBetterJSONStorage/blob/965cbd755a9f1d7c2424c73f2bf659d642c3de67/img/logo.png
     :scale: 100%
     :height: 150px
 
