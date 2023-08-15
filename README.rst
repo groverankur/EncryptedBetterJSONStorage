@@ -39,11 +39,10 @@ context Manager
 ===============
 .. code-block:: python
 
-    from pathlib import Path
     from tinydb import TinyDB
     from EncryptedBetterJSONStorage import EncryptedBetterJSONStorage
 
-    path = Path('relative/path/to/file.db')
+    path = 'relative/path/to/file.db'
 
     with TinyDB(path,encryption_key=b"KeY", encryption=True ,compression=True, access_mode="r+", storage=EncryptedBetterJSONStorage) as db:
         db.insert({'int': 1, 'char': 'a'})
