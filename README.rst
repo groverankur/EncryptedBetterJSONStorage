@@ -53,7 +53,7 @@ context Manager
 .. _Orjson: https://github.com/ijl/orjson
 .. _BLOSC2: https://github.com/Blosc/python-blosc2
 .. _cryptography: https://github.com/pyca/cryptography
-.. _BetterJSONStorage :https://github.com/MrPigss/BetterJSONStorage
+.. _BetterJSONStorage: https://github.com/MrPigss/BetterJSONStorage
 
 extra
 =====
@@ -75,5 +75,6 @@ Change encryption key
 You can change the encryption key of the storage by accessing the storage property of your `TinyDB docs <https://tinydb.readthedocs.io/>`_ database.
 
 .. code-block:: python
+
     db = ...
     db.storage.change_encryption_key("NEW_KEY")
